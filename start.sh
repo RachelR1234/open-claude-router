@@ -181,8 +181,8 @@ const idx = parseInt('${model_pick}') - 1;
     MODEL="openai/gpt-5.1-codex"
   fi
 
-  # Strip :free suffix — OpenRouter uses it for routing, but the actual model id has no suffix
-  MODEL="${MODEL%:free}"
+# Strip :free suffix — OpenRouter uses it for routing, but the actual model id has no suffix
+MODEL="${MODEL%:free}"
 
   # API key — use existing env var or prompt
   if [ -z "$OPENROUTER_API_KEY" ]; then
