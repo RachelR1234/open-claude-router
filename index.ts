@@ -43,31 +43,96 @@ export default {
       const bearerToken = env.OPENROUTER_API_KEY || request.headers.get("X-Api-Key") || 
         request.headers.get("Authorization")?.replace("Bearer ", "");
 
+      if (!bearerToken) {
+        return new Response(JSON.stringify({
+          error: { type: "authentication_error", message: "No API key provided" }
+        }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
       const baseUrl = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-      const openaiResponse = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${bearerToken}`,
-        },
-        body: JSON.stringify(openaiRequest),
-      });
+      
+      // Create an AbortController tied to the incoming request
+      const abortController = new AbortController();
+      const signal = abortController.signal;
+      
+      // If the client disconnects, abort the upstream fetch
+      request.signal.addEventListener('abort', () => {
+        abortController.abort();
+      }, { once: true });
+
+      let openaiResponse: Response;
+      try {
+        openaiResponse = await fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${bearerToken}`,
+          },
+          body: JSON.stringify(openaiRequest),
+          signal,
+        });
+      } catch (fetchErr: any) {
+        console.error('fetch to OpenRouter failed:', fetchErr?.message || fetchErr);
+        if (fetchErr?.name === 'AbortError') {
+          return new Response(JSON.stringify({
+            error: { type: "request_aborted", message: "Request was aborted" }
+          }), {
+            status: 499,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({
+          error: { type: "upstream_error", message: fetchErr?.message || "Upstream fetch failed" }
+        }), {
+          status: 502,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
 
       if (!openaiResponse.ok) {
-        return new Response(await openaiResponse.text(), { status: openaiResponse.status });
+        const errBody = await openaiResponse.text().catch(() => 'unknown error');
+        return new Response(errBody, { status: openaiResponse.status });
       }
 
       if (openaiRequest.stream) {
-        const anthropicStream = streamOpenAIToAnthropic(openaiResponse.body as ReadableStream, openaiRequest.model);
-        return new Response(anthropicStream, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-          },
-        });
+        try {
+          const anthropicStream = streamOpenAIToAnthropic(
+            openaiResponse.body as ReadableStream,
+            openaiRequest.model,
+            signal,
+          );
+          return new Response(anthropicStream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              "Connection": "keep-alive",
+            },
+          });
+        } catch (streamErr: any) {
+          console.error('stream creation failed:', streamErr?.message || streamErr);
+          return new Response(JSON.stringify({
+            error: { type: "stream_error", message: streamErr?.message || "Stream processing failed" }
+          }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
       } else {
-        const openaiData = await openaiResponse.json();
+        let openaiData: any;
+        try {
+          openaiData = await openaiResponse.json();
+        } catch (jsonErr: any) {
+          console.error('failed to parse upstream JSON response:', jsonErr?.message || jsonErr);
+          return new Response(JSON.stringify({
+            error: { type: "parse_error", message: "Failed to parse upstream response" }
+          }), {
+            status: 502,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
         const anthropicResponse = formatOpenAIToAnthropic(openaiData, openaiRequest.model);
         return new Response(JSON.stringify(anthropicResponse), {
           headers: { "Content-Type": "application/json" }

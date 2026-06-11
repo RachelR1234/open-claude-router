@@ -6,6 +6,8 @@ services:
       - "8787:8787"
     environment:
       - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - MODEL_OVERRIDE=${MODEL_OVERRIDE}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
       - .:/app
       - /app/node_modules

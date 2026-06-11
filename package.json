@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "build": "wrangler build",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "server": "tsx server.ts"
   },
   "keywords": [],
   "author": "",

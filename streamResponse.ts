@@ -1,9 +1,19 @@
-export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: string): ReadableStream {
+export function streamOpenAIToAnthropic(
+  openaiStream: ReadableStream,
+  model: string,
+  abortSignal?: AbortSignal,
+): ReadableStream {
   const messageId = "msg_" + Date.now();
-  
+  let streamCancelled = false;
+
   const enqueueSSE = (controller: ReadableStreamDefaultController, eventType: string, data: any) => {
-    const sseMessage = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-    controller.enqueue(new TextEncoder().encode(sseMessage));
+    if (streamCancelled) return;
+    try {
+      const sseMessage = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+      controller.enqueue(new TextEncoder().encode(sseMessage));
+    } catch (e) {
+      // Controller might already be closed/errored - ignore
+    }
   };
   
   return new ReadableStream({
@@ -36,9 +46,26 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
       const decoder = new TextDecoder();
       let buffer = '';
 
+      // Listen to abort signal to cancel the stream reading
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => {
+          streamCancelled = true;
+          try { reader.cancel(); } catch (_) { /* ignore */ }
+          try { controller.close(); } catch (_) { /* ignore */ }
+        }, { once: true });
+      }
+
       try {
-        while (true) {
-          const { done, value } = await reader.read();
+        while (!streamCancelled) {
+          let result: ReadableStreamReadResult<Uint8Array>;
+          try {
+            result = await reader.read();
+          } catch (readErr: any) {
+            console.error('stream read error:', readErr?.message || readErr);
+            break;
+          }
+
+          const { done, value } = result;
           if (done) {
             // Process any remaining data in buffer
             if (buffer.trim()) {
@@ -58,7 +85,7 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
                       processStreamDelta(delta);
                     }
                   } catch (e) {
-                    // Parse error
+                    // Parse error - skip malformed line
                   }
                 }
               }
@@ -67,7 +94,13 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
           }
           
           // Decode chunk and add to buffer
-          const chunk = decoder.decode(value, { stream: true });
+          let chunk: string;
+          try {
+            chunk = decoder.decode(value, { stream: true });
+          } catch (decodeErr: any) {
+            console.error('stream decode error:', decodeErr?.message || decodeErr);
+            continue;
+          }
           buffer += chunk;
           
           // Process complete lines from buffer
@@ -92,24 +125,26 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
                   processStreamDelta(delta);
                 }
               } catch (e) {
-                // Parse error
+                // Parse error - skip malformed line
                 continue;
               }
             }
           }
         }
+      } catch (outerErr: any) {
+        console.error('stream processing outer error:', outerErr?.message || outerErr);
+        streamCancelled = true;
       } finally {
-        reader.releaseLock();
+        try {
+          reader.releaseLock();
+        } catch (_) { /* ignore */ }
       }
 
       function processStreamDelta(delta: any) {
-        if (delta.usage) {
-          usage = delta.usage;
-        }
+        if (streamCancelled) return;
 
         // Handle tool calls
         if (delta.tool_calls?.length > 0) {
-          // Existing tool call logic
           for (const toolCall of delta.tool_calls) {
             const toolCallId = toolCall.id;
 
@@ -122,8 +157,8 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
               }
 
               isToolUse = true;
-              hasStartedTextBlock = false; // Reset text block flag
-              hasStartedThinkingBlock = false; // Reset thinking block flag
+              hasStartedTextBlock = false;
+              hasStartedThinkingBlock = false;
               currentToolCallId = toolCallId;
               contentBlockIndex++;
               toolCallJsonMap.set(toolCallId, "");
@@ -176,7 +211,7 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
               content_block: {
                 type: "thinking",
                 thinking: "",
-                signature: "openrouter-reasoning" // Placeholder
+                signature: "openrouter-reasoning"
               },
             });
             hasStartedThinkingBlock = true;
@@ -197,10 +232,10 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
               type: "content_block_stop",
               index: contentBlockIndex,
             });
-            isToolUse = false; // Reset tool use flag
-            hasStartedThinkingBlock = false; // Reset thinking block flag
+            isToolUse = false;
+            hasStartedThinkingBlock = false;
             currentToolCallId = null;
-            contentBlockIndex++; // Increment for new text block
+            contentBlockIndex++;
           }
 
           if (!hasStartedTextBlock) {
@@ -226,32 +261,42 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
         }
       }
 
-      // Close last content block
-      if (isToolUse || hasStartedTextBlock || hasStartedThinkingBlock) {
-        enqueueSSE(controller, "content_block_stop", {
-          type: "content_block_stop",
-          index: contentBlockIndex,
+      // Only send closing events if we didn't cancel mid-stream
+      if (!streamCancelled) {
+        // Close last content block
+        if (isToolUse || hasStartedTextBlock || hasStartedThinkingBlock) {
+          enqueueSSE(controller, "content_block_stop", {
+            type: "content_block_stop",
+            index: contentBlockIndex,
+          });
+        }
+
+        // Send message_delta and message_stop
+        enqueueSSE(controller, "message_delta", {
+          type: "message_delta",
+          delta: {
+            stop_reason: isToolUse ? "tool_use" : "end_turn",
+            stop_sequence: null,
+          },
+          usage: {
+            input_tokens: usage?.prompt_tokens || 0,
+            output_tokens: usage?.completion_tokens || 0,
+          },
+        });
+
+        enqueueSSE(controller, "message_stop", {
+          type: "message_stop",
         });
       }
 
-      // Send message_delta and message_stop
-      enqueueSSE(controller, "message_delta", {
-        type: "message_delta",
-        delta: {
-          stop_reason: isToolUse ? "tool_use" : "end_turn",
-          stop_sequence: null,
-        },
-        usage: {
-          input_tokens: usage?.prompt_tokens || 0,
-          output_tokens: usage?.completion_tokens || 0,
-        },
-      });
+      try {
+        controller.close();
+      } catch (_) { /* ignore if already closed */ }
+    },
 
-      enqueueSSE(controller, "message_stop", {
-        type: "message_stop",
-      });
-
-      controller.close();
+    cancel(reason) {
+      streamCancelled = true;
+      console.error('stream cancelled by consumer:', reason);
     },
   });
 }
