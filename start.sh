@@ -69,28 +69,34 @@ console.log('  a) Enter custom model ID');
 " 2>/dev/null
     FREE_COUNT=$(node -p "require('./models.json').data.filter(m=>m.id.endsWith(':free')).length" 2>/dev/null)
   else
-    # Paid curated shortlist
+    # Paid curated shortlist — sorted by price from lowest to highest
     node -e "
 const data = require('./models.json');
-const models = data.data;
 const curated = [
-  'openai/gpt-5.1-codex',
+  'openai/gpt-oss-20b',
+  'amazon/nova-micro-v1',
+  'google/gemma-3-12b-it',
+  'qwen/qwen3-30b-a3b',
+  'mistralai/mistral-small-3.2-24b-instruct',
+  'deepseek/deepseek-v3.2-exp',
+  'qwen/qwen3-coder-flash',
+  'google/gemini-2.5-flash',
   'openai/gpt-5.1-codex-mini',
-  'openai/gpt-5.1-chat',
+  'qwen/qwen3-coder-plus',
+  'openai/gpt-5.1-codex',
+  'google/gemini-2.5-pro',
   'anthropic/claude-sonnet-4.5',
   'anthropic/claude-haiku-4.5',
-  'deepseek/deepseek-v3.2-exp',
-  'qwen/qwen3-coder-plus',
-  'mistralai/mistral-small-3.2-24b-instruct',
-  'google/gemini-2.5-flash',
-  'google/gemini-2.5-pro',
 ];
-console.log('\\nQuick picks (enter the number, or 0 to see ALL models):');
-curated.forEach((id, i) => {
+// Sort by actual price
+const models = data.data;
+const withPrice = curated.map(id => {
   const m = models.find(x => x.id === id);
-  const name = m ? m.name : id;
-  console.log('  ' + (i+1) + ') ' + name);
+  return { id, name: m ? m.name : id, price: parseFloat(m?.pricing?.prompt || 0) + parseFloat(m?.pricing?.completion || 0) };
 });
+withPrice.sort((a, b) => a.price - b.price);
+console.log('\\nQuick picks (sorted by price, cheapest first):');
+withPrice.forEach((m, i) => console.log('  ' + (i+1) + ') [' + m.price.toFixed(7) + '/tok] ' + m.name));
 console.log('  0) Show all models');
 console.log('  a) Enter custom model ID');
 " 2>/dev/null
@@ -101,7 +107,7 @@ console.log('  a) Enter custom model ID');
   echo ""
 
   # Determine curated list size
-  CURATED_SIZE=10
+  CURATED_SIZE=14
   if [ "$tier_choice" = "2" ]; then CURATED_SIZE=${FREE_COUNT:-0}; fi
 
   # If number out of curated range, treat as "show all"
@@ -142,20 +148,31 @@ const idx = parseInt('${model_pick}') - 1;
 " 2>/dev/null)
     else
       MODEL=$(node -p "
+const data = require('./models.json');
+const all = data.data;
 const curated = [
-  'openai/gpt-5.1-codex',
+  'openai/gpt-oss-20b',
+  'amazon/nova-micro-v1',
+  'google/gemma-3-12b-it',
+  'qwen/qwen3-30b-a3b',
+  'mistralai/mistral-small-3.2-24b-instruct',
+  'deepseek/deepseek-v3.2-exp',
+  'qwen/qwen3-coder-flash',
+  'google/gemini-2.5-flash',
   'openai/gpt-5.1-codex-mini',
-  'openai/gpt-5.1-chat',
+  'qwen/qwen3-coder-plus',
+  'openai/gpt-5.1-codex',
+  'google/gemini-2.5-pro',
   'anthropic/claude-sonnet-4.5',
   'anthropic/claude-haiku-4.5',
-  'deepseek/deepseek-v3.2-exp',
-  'qwen/qwen3-coder-plus',
-  'mistralai/mistral-small-3.2-24b-instruct',
-  'google/gemini-2.5-flash',
-  'google/gemini-2.5-pro',
 ];
+const withPrice = curated.map(id => {
+  const m = all.find(x => x.id === id);
+  return { id, price: parseFloat(m?.pricing?.prompt || 0) + parseFloat(m?.pricing?.completion || 0) };
+});
+withPrice.sort((a, b) => a.price - b.price);
 const idx = parseInt('${model_pick}') - 1;
-curated[idx] || curated[0];
+(withPrice[idx] || withPrice[0]).id;
 " 2>/dev/null)
     fi
   fi
